@@ -1,3 +1,12 @@
+<!DOCTYPE html>
+<html lang="ko">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no, viewport-fit=cover">
+<meta name="mobile-web-app-capable" content="yes">
+<meta name="apple-mobile-web-app-capable" content="yes">
+<meta name="apple-mobile-web-app-status-bar-style" content="black-translucent">
+<title>DAY MASTER · Franklin-style Planner</title>
 <style>
   :root{
     --paper:#efe4c8;
@@ -316,8 +325,24 @@
     body{padding:12px 6px;}
     .binder{padding:14px 12px 14px 26px;}
     .tabs{padding-top:40px;}
+    .brand{font-size:11px;}
+    .date-nav .date-main{font-size:20px;}
+    .col-title{font-size:14px;}
+  }
+  @media (max-width:400px){
+    body{padding:8px 4px;}
+    .binder{padding:10px 8px 10px 20px;}
+    .ring-holes{width:10px;left:6px;}
+    .ring-holes span{width:10px;height:10px;}
+    .tab-btn{font-size:11.5px;padding:12px 6px;}
+    .date-nav .date-main{font-size:18px;}
+    .brand{font-size:10px;letter-spacing:.08em;}
+    .brand b{font-size:10px;}
+    .task-add{flex-wrap:wrap;}
   }
 </style>
+</head>
+<body>
 
 <div id="app">
   <div class="binder">
@@ -327,6 +352,12 @@
     <div class="brand-row">
       <div class="brand">📘 <b>DAY&nbsp;MASTER</b> · Franklin-style Planner</div>
       <div class="brand" id="yearTag"></div>
+    </div>
+    <div class="brand-row" style="padding-top:0;">
+      <div class="brand" id="syncStatus" style="font-size:11px;opacity:.75;"></div>
+      <div class="brand" style="font-size:11px;">
+        <button id="syncRefreshBtn" style="background:none;border:1px solid var(--brass);color:var(--brass-light);border-radius:4px;padding:2px 8px;cursor:pointer;font-family:var(--font-mono);font-size:10.5px;">⟳ 새로고침</button>
+      </div>
     </div>
 
     <div class="page-wrap">
@@ -354,6 +385,19 @@
 
   const HOURS = []; for(let h=7; h<=21; h++) HOURS.push(pad(h)+":00");
 
+  /* ---------------- 구글시트(Apps Script) 연동 설정 ---------------- */
+  // 1) 구글시트에서 확장 프로그램 > Apps Script 에 Code.gs 코드를 붙여넣고
+  // 2) 배포 > 새 배포 > 웹 앱으로 배포 (액세스 권한: "모든 사용자") 한 뒤
+  // 3) 발급된 웹 앱 URL(.../exec)을 아래에 붙여넣으세요.
+  const CONFIG = {
+    GAS_URL: 'https://script.google.com/macros/s/여기에_배포된_웹앱_URL을_붙여넣으세요/exec',
+    POLL_MS: 20000 // 다른 기기/브라우저에서의 변경사항을 주기적으로 반영 (밀리초)
+  };
+
+  function gasConfigured(){
+    return CONFIG.GAS_URL && !CONFIG.GAS_URL.includes('여기에');
+  }
+
   /* ---------------- state ---------------- */
   let state = {
     tasks: [],      // {id,date,letter,order,text,done,detail}
@@ -367,27 +411,74 @@
   };
 
   let saveTimer = null;
-  function queueSave(key, value){
-    window.storage.set(key, JSON.stringify(value)).catch(()=>{});
+
+  /* ---- JSONP GET: 구글시트 전체 데이터 조회 (CORS 문제 없이 동작) ---- */
+  function jsonp(url){
+    return new Promise((resolve, reject)=>{
+      const cbName = 'plannerCb_' + Math.random().toString(36).slice(2);
+      const script = document.createElement('script');
+      const timer = setTimeout(()=>{ cleanup(); reject(new Error('timeout')); }, 15000);
+      function cleanup(){ delete window[cbName]; script.remove(); clearTimeout(timer); }
+      window[cbName] = (data)=>{ cleanup(); resolve(data); };
+      script.onerror = ()=>{ cleanup(); reject(new Error('load error')); };
+      script.src = url + (url.includes('?') ? '&' : '?') + 'callback=' + cbName + '&_=' + Date.now();
+      document.body.appendChild(script);
+    });
   }
 
-  async function loadAll(){
+  /* ---- POST: 개별 항목 추가/수정/삭제 (text/plain 으로 보내 preflight 회피) ---- */
+  async function postAction(action, payload){
+    if(!gasConfigured()) return null;
     try{
-      const [t,m,d] = await Promise.allSettled([
-        window.storage.get('tasks'),
-        window.storage.get('meetings'),
-        window.storage.get('dayMeta')
-      ]);
-      if(t.status==='fulfilled' && t.value) state.tasks = JSON.parse(t.value.value)||[];
-      if(m.status==='fulfilled' && m.value) state.meetings = JSON.parse(m.value.value)||[];
-      if(d.status==='fulfilled' && d.value) state.dayMeta = JSON.parse(d.value.value)||{};
-    }catch(e){ /* first run, nothing stored yet */ }
+      const res = await fetch(CONFIG.GAS_URL, {
+        method:'POST',
+        headers:{'Content-Type':'text/plain;charset=utf-8'},
+        body: JSON.stringify(Object.assign({action}, payload))
+      });
+      return await res.json();
+    }catch(e){
+      console.error('sync post failed:', action, e);
+      setSyncStatus('⚠ 오프라인 — 이 기기에만 임시 저장됨');
+      return null;
+    }
+  }
+
+  function setSyncStatus(text){
+    const el = document.getElementById('syncStatus');
+    if(el) el.textContent = text;
+  }
+
+  function isTypingNow(){
+    const a = document.activeElement;
+    return a && (a.id==='focusInput' || a.id==='detailArea' || a.id==='taskInput' || a.tagName==='INPUT' && a.closest('.inline-form'));
+  }
+
+  async function loadAll(silent){
+    if(!gasConfigured()){
+      setSyncStatus('⚠ 구글시트 미연동 — CONFIG.GAS_URL을 설정하세요');
+      render();
+      return;
+    }
+    if(!silent) setSyncStatus('불러오는 중…');
+    try{
+      const data = await jsonp(CONFIG.GAS_URL);
+      state.tasks = data.tasks || [];
+      state.meetings = data.meetings || [];
+      state.dayMeta = data.dayMeta || {};
+      const t = new Date();
+      setSyncStatus('✓ 동기화됨 · ' + pad(t.getHours()) + ':' + pad(t.getMinutes()));
+    }catch(e){
+      console.error('sync get failed:', e);
+      setSyncStatus('⚠ 구글시트에서 불러오지 못했습니다');
+    }
     render();
   }
 
-  function saveTasks(){ queueSave('tasks', state.tasks); }
-  function saveMeetings(){ queueSave('meetings', state.meetings); }
-  function saveDayMeta(){ queueSave('dayMeta', state.dayMeta); }
+  // 다른 기기/브라우저(예: 아이폰 사파리, 다른 PC)에서 바뀐 내용을 주기적으로 반영
+  setInterval(()=>{ if(!isTypingNow()) loadAll(true); }, CONFIG.POLL_MS);
+  document.addEventListener('visibilitychange', ()=>{
+    if(document.visibilityState==='visible' && !isTypingNow()) loadAll(true);
+  });
 
   /* ---------------- derived helpers ---------------- */
   function tasksForDate(dk){
@@ -655,7 +746,7 @@
         state.dayMeta[dk] = state.dayMeta[dk] || {};
         state.dayMeta[dk].focus = focusInput.value;
         clearTimeout(saveTimer);
-        saveTimer = setTimeout(saveDayMeta, 400);
+        saveTimer = setTimeout(()=>{ postAction('upsertDayMeta', {date:dk, focus: state.dayMeta[dk].focus}); }, 400);
       };
     }
 
@@ -693,8 +784,10 @@
         const text = input.value.trim();
         if(!text) return;
         const dk = state.currentDate;
-        state.tasks.push({id:uid(), date:dk, letter:sel.value, order:nextOrder(dk,sel.value), text, done:false, detail:''});
-        saveTasks(); input.value=''; render();
+        const newTask = {id:uid(), date:dk, letter:sel.value, order:nextOrder(dk,sel.value), text, done:false, detail:''};
+        state.tasks.push(newTask);
+        postAction('upsertTask', {task:newTask});
+        input.value=''; render();
       };
       addBtn.onclick = doAdd;
       const ti = document.getElementById('taskInput');
@@ -705,14 +798,16 @@
     page.querySelectorAll('[data-act="toggle-task"]').forEach(el=>{
       el.onchange = ()=>{
         const t = state.tasks.find(x=>x.id===el.dataset.id);
-        if(t){ t.done = el.checked; saveTasks(); render(); }
+        if(t){ t.done = el.checked; postAction('upsertTask', {task:t}); render(); }
       };
     });
     page.querySelectorAll('[data-act="del-task"]').forEach(el=>{
       el.onclick = ()=>{
-        state.tasks = state.tasks.filter(x=>x.id!==el.dataset.id);
-        if(state.selectedTaskId===el.dataset.id) state.selectedTaskId=null;
-        saveTasks(); render();
+        const id = el.dataset.id;
+        state.tasks = state.tasks.filter(x=>x.id!==id);
+        if(state.selectedTaskId===id) state.selectedTaskId=null;
+        postAction('deleteTask', {id});
+        render();
       };
     });
     page.querySelectorAll('[data-act="open-detail"]').forEach(el=>{
@@ -741,12 +836,19 @@
         const [titleEl, timeEl] = form.querySelectorAll('input');
         const title = titleEl.value.trim();
         if(!title) return;
-        state.meetings.push({id:uid(), date:state.currentDate, time:timeEl.value.trim()||'00:00', title});
-        saveMeetings(); render();
+        const newMeeting = {id:uid(), date:state.currentDate, time:timeEl.value.trim()||'00:00', title};
+        state.meetings.push(newMeeting);
+        postAction('upsertMeeting', {meeting:newMeeting});
+        render();
       };
     }
     page.querySelectorAll('[data-act="del-meeting"]').forEach(el=>{
-      el.onclick = ()=>{ state.meetings = state.meetings.filter(m=>m.id!==el.dataset.id); saveMeetings(); render(); };
+      el.onclick = ()=>{
+        const id = el.dataset.id;
+        state.meetings = state.meetings.filter(m=>m.id!==id);
+        postAction('deleteMeeting', {id});
+        render();
+      };
     });
 
     // tab2
@@ -759,7 +861,7 @@
         const note = document.getElementById('saveNote');
         note.textContent = '저장 중…';
         clearTimeout(saveTimer);
-        saveTimer = setTimeout(()=>{ saveTasks(); note.textContent='✓ 저장됨'; setTimeout(()=>note.textContent='',1200); }, 500);
+        saveTimer = setTimeout(()=>{ postAction('upsertTask', {task:t}); note.textContent='✓ 저장됨'; setTimeout(()=>note.textContent='',1200); }, 500);
       };
     }
     const backBtn = page.querySelector('[data-act="back-to-tab1"]');
@@ -796,7 +898,11 @@
     btn.addEventListener('click', ()=>{ state.tab = btn.dataset.tab; render(); });
   });
 
+  const refreshBtn = document.getElementById('syncRefreshBtn');
+  if(refreshBtn) refreshBtn.onclick = ()=> loadAll();
+
   loadAll();
 })();
 </script>
-</script>
+</body>
+</html>
