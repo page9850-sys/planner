@@ -482,23 +482,44 @@
   // 기존 loadAll 함수 내부 수정 예시
 async function loadAll() {
   const syncStatus = document.getElementById('syncStatus');
+  const syncTime = document.getElementById('syncTime');
+
+  // CONFIG.GAS_URL 주소가 설정되어 있지 않으면 로컬스토리지 모드로 동작
+  if (!CONFIG.GAS_URL || CONFIG.GAS_URL.includes('YOUR_GAS_WEB_APP_URL')) {
+    if (syncStatus) syncStatus.textContent = '● 로컬 모드';
+    return;
+  }
+
   try {
     if (syncStatus) syncStatus.textContent = '동기화 중…';
-    
-    const res = await fetch(API_ENDPOINT); // 기존에 작성된 요청 URL 유지
+
+    // Google Apps Script 요청 시 redirect: 'follow' 옵션 필수
+    const res = await fetch(CONFIG.GAS_URL + '?action=readAll', {
+      method: 'GET',
+      redirect: 'follow'
+    });
+
     if (!res.ok) throw new Error(`HTTP 에러: ${res.status}`);
-    
+
     const data = await res.json();
 
-    // 💡 핵심 수정 1: 응답 데이터가 정상적인 배열일 때만 state/UI 업데이트
-    if (Array.isArray(data)) {
-      state.tasks = data; // 사용 중인 변수명 유지
+    // 💡 [핵심] 구글 응답 데이터 형태(data.tasks 또는 data) 검증
+    const fetchedTasks = Array.isArray(data) ? data : (data.tasks || null);
+
+    if (Array.isArray(fetchedTasks)) {
+      // 정상적으로 배열을 받아왔을 때만 state 업데이트 (데이터 보호)
+      state.tasks = fetchedTasks;
       render();
+
       if (syncStatus) syncStatus.textContent = '✓ 동기화됨';
+      if (syncTime) {
+        const now = new Date();
+        syncTime.textContent = `${String(now.getHours()).padStart(2,'0')}:${String(now.getMinutes()).padStart(2,'0')}`;
+      }
     }
   } catch (err) {
-    console.error('동기화 오류:', err);
-    // 💡 핵심 수정 2: 동기화 실패 시 기존 state.tasks를 []로 초기화하지 않고 그대로 유지
+    console.error('동기화 실패:', err);
+    // 💡 [핵심] 실패 시 state.tasks = []로 비우지 않고 기존 데이터 유지!
     if (syncStatus) syncStatus.textContent = '⚠ 동기화 실패 (기존 데이터 유지)';
   }
 }
