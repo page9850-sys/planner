@@ -220,10 +220,12 @@
   .task-list{list-style:none;padding:0;margin:0;}
   .task-item{
     display:flex;align-items:flex-start;gap:8px;padding:8px 4px;border-bottom:1px solid var(--paper-line);
+    flex-wrap:wrap;
   }
   .task-item.done{opacity:.55;}
   .task-item.done .task-text{text-decoration:line-through;}
-  .task-check{margin-top:3px;cursor:pointer;width:15px;height:15px;accent-color:var(--a-color);}
+  .task-item.delegated{opacity:.75;}
+  .task-item.delegated .task-text{font-style:italic;}
   .task-badge{
     font-family:var(--font-mono);font-size:11px;font-weight:bold;padding:1px 6px;border-radius:3px;
     white-space:nowrap;margin-top:1px;
@@ -231,8 +233,20 @@
   .task-text{flex:1;font-size:14px;line-height:1.4;cursor:pointer;color:var(--ink);}
   .task-text:hover{color:var(--a-color);text-decoration:underline;}
   .task-detail-dot{font-size:10px;color:var(--brass);margin-left:4px;}
-  .task-del{background:none;border:none;color:var(--ink-soft);cursor:pointer;font-size:14px;padding:0 3px;}
-  .task-del:hover{color:var(--a-color);}
+  .task-status-tag{
+    font-family:var(--font-mono);font-size:10px;margin-left:6px;padding:1px 5px;border-radius:3px;
+    white-space:nowrap;
+  }
+  .task-status-tag.deleg{background:var(--b-bg);color:var(--b-color);}
+  .task-actions{display:flex;gap:2px;margin-top:1px;flex:none;}
+  .task-act{
+    background:none;border:1px solid var(--paper-line);color:var(--ink-soft);cursor:pointer;
+    font-size:12px;line-height:1;padding:4px 6px;border-radius:4px;
+  }
+  .task-act:hover{border-color:var(--brass);color:var(--ink);}
+  .task-act.active{background:var(--a-color);border-color:var(--a-color);color:#fff8ea;}
+  .task-act.del{border:none;color:var(--ink-soft);font-size:14px;padding:4px 3px;}
+  .task-act.del:hover{color:var(--a-color);}
   .empty-msg{color:var(--ink-soft);font-size:12.5px;font-style:italic;padding:10px 2px;}
 
   /* time grid */
@@ -390,7 +404,7 @@
   // 2) 배포 > 새 배포 > 웹 앱으로 배포 (액세스 권한: "모든 사용자") 한 뒤
   // 3) 발급된 웹 앱 URL(.../exec)을 아래에 붙여넣으세요.
   const CONFIG = {
-    GAS_URL: 'https://script.google.com/macros/s/AKfycbx1rABBzzV-0ZcgwPHX8CSkgyjSsfaa5vH-sKNv9RWV_kTFSe10m4tnyvCbEDUEeEy_HQ/exec',
+    GAS_URL: 'https://script.google.com/macros/s/여기에_배포된_웹앱_URL을_붙여넣으세요/exec',
     POLL_MS: 20000 // 다른 기기/브라우저에서의 변경사항을 주기적으로 반영 (밀리초)
   };
 
@@ -400,7 +414,7 @@
 
   /* ---------------- state ---------------- */
   let state = {
-    tasks: [],      // {id,date,letter,order,text,done,detail}
+    tasks: [],      // {id,date,letter,order,text,done,detail,status,delegate}
     meetings: [],   // {id,date,time,title}
     dayMeta: {},    // {date:{focus:''}}
     currentDate: toKey(new Date()),
@@ -411,6 +425,8 @@
   };
 
   let saveTimer = null;
+  let lastLocalChangeAt = 0; // 마지막으로 로컬에서 데이터를 바꾼 시각(ms) — 폴링과의 경쟁상태 방지용
+  const POLL_GUARD_MS = 4000; // 로컬 변경 후 이 시간 동안은 자동 새로고침(loadAll)을 건너뜀
 
   /* ---- JSONP GET: 구글시트 전체 데이터 조회 (CORS 문제 없이 동작) ---- */
   function jsonp(url){
@@ -428,6 +444,7 @@
 
   /* ---- POST: 개별 항목 추가/수정/삭제 (text/plain 으로 보내 preflight 회피) ---- */
   async function postAction(action, payload){
+    lastLocalChangeAt = Date.now(); // 저장 요청 시작 시점부터 가드 시작
     if(!gasConfigured()) return null;
     try{
       const res = await fetch(CONFIG.GAS_URL, {
@@ -435,10 +452,13 @@
         headers:{'Content-Type':'text/plain;charset=utf-8'},
         body: JSON.stringify(Object.assign({action}, payload))
       });
-      return await res.json();
+      const result = await res.json();
+      lastLocalChangeAt = Date.now(); // 저장이 실제로 끝난 시점 기준으로 가드 시간을 다시 갱신
+      return result;
     }catch(e){
       console.error('sync post failed:', action, e);
       setSyncStatus('⚠ 오프라인 — 이 기기에만 임시 저장됨');
+      lastLocalChangeAt = Date.now();
       return null;
     }
   }
@@ -451,6 +471,12 @@
   function isTypingNow(){
     const a = document.activeElement;
     return a && (a.id==='focusInput' || a.id==='detailArea' || a.id==='taskInput' || a.tagName==='INPUT' && a.closest('.inline-form'));
+  }
+
+  // 로컬 변경 직후(POLL_GUARD_MS 이내)에는 자동 새로고침을 건너뛰어,
+  // 구글시트에 저장이 채 반영되기 전에 옛 데이터로 덮어써지는 것을 방지합니다.
+  function canPollNow(){
+    return !isTypingNow() && (Date.now() - lastLocalChangeAt) > POLL_GUARD_MS;
   }
 
   async function loadAll(silent){
@@ -475,9 +501,19 @@
   }
 
   // 다른 기기/브라우저(예: 아이폰 사파리, 다른 PC)에서 바뀐 내용을 주기적으로 반영
-  setInterval(()=>{ if(!isTypingNow()) loadAll(true); }, CONFIG.POLL_MS);
+  // setInterval 대신 완료 후 재예약 방식을 써서, 폴링이 진행 중인 저장 요청과 겹치지 않게 함
+  let pollTimer = null;
+  function schedulePoll(){
+    if(pollTimer) clearTimeout(pollTimer);
+    pollTimer = setTimeout(async ()=>{
+      if(canPollNow()) await loadAll(true);
+      schedulePoll();
+    }, CONFIG.POLL_MS);
+  }
+  schedulePoll();
+
   document.addEventListener('visibilitychange', ()=>{
-    if(document.visibilityState==='visible' && !isTypingNow()) loadAll(true);
+    if(document.visibilityState==='visible' && canPollNow()) loadAll(true);
   });
 
   /* ---------------- derived helpers ---------------- */
@@ -586,12 +622,20 @@
   function taskRow(t){
     const colors = {A:['var(--a-bg)','var(--a-color)'], B:['var(--b-bg)','var(--b-color)'], C:['var(--c-bg)','var(--c-color)']};
     const [bg,fg] = colors[t.letter];
+    const status = t.status || (t.done ? 'done' : 'open');
+    const statusTag = status==='delegated'
+      ? `<span class="task-status-tag deleg">위임${t.delegate?': '+escapeHtml(t.delegate):''}</span>`
+      : '';
     return `
-      <li class="task-item ${t.done?'done':''}" data-id="${t.id}">
-        <input type="checkbox" class="task-check" ${t.done?'checked':''} data-act="toggle-task" data-id="${t.id}"/>
+      <li class="task-item ${status}" data-id="${t.id}">
         <span class="task-badge" style="background:${bg};color:${fg}">${t.letter}${t.order}</span>
-        <span class="task-text" data-act="open-detail" data-id="${t.id}">${escapeHtml(t.text)}${t.detail?'<span class="task-detail-dot">●노트</span>':''}</span>
-        <button class="task-del" data-act="del-task" data-id="${t.id}" title="삭제">✕</button>
+        <span class="task-text" data-act="open-detail" data-id="${t.id}">${escapeHtml(t.text)}${t.detail?'<span class="task-detail-dot">●노트</span>':''}${statusTag}</span>
+        <div class="task-actions">
+          <button class="task-act ${status==='done'?'active':''}" data-act="task-status" data-status="done" data-id="${t.id}" title="완료">✓</button>
+          <button class="task-act ${status==='carried'?'active':''}" data-act="task-status" data-status="carried" data-id="${t.id}" title="이월(다음날로)">↷</button>
+          <button class="task-act ${status==='delegated'?'active':''}" data-act="task-status" data-status="delegated" data-id="${t.id}" title="위임">👤</button>
+          <button class="task-act del" data-act="del-task" data-id="${t.id}" title="삭제">✕</button>
+        </div>
       </li>`;
   }
 
@@ -784,7 +828,7 @@
         const text = input.value.trim();
         if(!text) return;
         const dk = state.currentDate;
-        const newTask = {id:uid(), date:dk, letter:sel.value, order:nextOrder(dk,sel.value), text, done:false, detail:''};
+        const newTask = {id:uid(), date:dk, letter:sel.value, order:nextOrder(dk,sel.value), text, done:false, detail:'', status:'open', delegate:''};
         state.tasks.push(newTask);
         postAction('upsertTask', {task:newTask});
         input.value=''; render();
@@ -794,11 +838,36 @@
       ti.onkeydown = e=>{ if(e.key==='Enter') doAdd(); };
     }
 
-    // task toggle / delete / open detail
-    page.querySelectorAll('[data-act="toggle-task"]').forEach(el=>{
-      el.onchange = ()=>{
+    // task 상태 변경: 완료 / 이월 / 위임 (다시 누르면 진행중으로 되돌림)
+    page.querySelectorAll('[data-act="task-status"]').forEach(el=>{
+      el.onclick = ()=>{
         const t = state.tasks.find(x=>x.id===el.dataset.id);
-        if(t){ t.done = el.checked; postAction('upsertTask', {task:t}); render(); }
+        if(!t) return;
+        const clicked = el.dataset.status;
+        const current = t.status || (t.done ? 'done' : 'open');
+
+        if(clicked === 'carried'){
+          // 다음날로 이월: 날짜를 다음날로 옮기고 진행중 상태로 재등록
+          t.date = shiftDate(t.date, 1);
+          t.order = nextOrder(t.date, t.letter);
+          t.status = 'open';
+          t.done = false;
+        } else if(current === clicked){
+          // 같은 버튼을 다시 누르면 진행중으로 취소
+          t.status = 'open';
+          t.done = false;
+          if(clicked==='delegated') t.delegate = '';
+        } else if(clicked === 'delegated'){
+          const name = window.prompt('위임할 대상(생략 가능):', t.delegate||'') || '';
+          t.status = 'delegated';
+          t.delegate = name;
+          t.done = false;
+        } else if(clicked === 'done'){
+          t.status = 'done';
+          t.done = true;
+        }
+        postAction('upsertTask', {task:t});
+        render();
       };
     });
     page.querySelectorAll('[data-act="del-task"]').forEach(el=>{
