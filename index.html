@@ -479,26 +479,29 @@
     return !isTypingNow() && (Date.now() - lastLocalChangeAt) > POLL_GUARD_MS;
   }
 
-  async function loadAll(silent){
-    if(!gasConfigured()){
-      setSyncStatus('⚠ 구글시트 미연동 — CONFIG.GAS_URL을 설정하세요');
+  // 기존 loadAll 함수 내부 수정 예시
+async function loadAll() {
+  const syncStatus = document.getElementById('syncStatus');
+  try {
+    if (syncStatus) syncStatus.textContent = '동기화 중…';
+    
+    const res = await fetch(API_ENDPOINT); // 기존에 작성된 요청 URL 유지
+    if (!res.ok) throw new Error(`HTTP 에러: ${res.status}`);
+    
+    const data = await res.json();
+
+    // 💡 핵심 수정 1: 응답 데이터가 정상적인 배열일 때만 state/UI 업데이트
+    if (Array.isArray(data)) {
+      state.tasks = data; // 사용 중인 변수명 유지
       render();
-      return;
+      if (syncStatus) syncStatus.textContent = '✓ 동기화됨';
     }
-    if(!silent) setSyncStatus('불러오는 중…');
-    try{
-      const data = await jsonp(CONFIG.GAS_URL);
-      state.tasks = data.tasks || [];
-      state.meetings = data.meetings || [];
-      state.dayMeta = data.dayMeta || {};
-      const t = new Date();
-      setSyncStatus('✓ 동기화됨 · ' + pad(t.getHours()) + ':' + pad(t.getMinutes()));
-    }catch(e){
-      console.error('sync get failed:', e);
-      setSyncStatus('⚠ 구글시트에서 불러오지 못했습니다');
-    }
-    render();
+  } catch (err) {
+    console.error('동기화 오류:', err);
+    // 💡 핵심 수정 2: 동기화 실패 시 기존 state.tasks를 []로 초기화하지 않고 그대로 유지
+    if (syncStatus) syncStatus.textContent = '⚠ 동기화 실패 (기존 데이터 유지)';
   }
+}
 
   // 다른 기기/브라우저(예: 아이폰 사파리, 다른 PC)에서 바뀐 내용을 주기적으로 반영
   // setInterval 대신 완료 후 재예약 방식을 써서, 폴링이 진행 중인 저장 요청과 겹치지 않게 함
