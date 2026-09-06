@@ -593,7 +593,8 @@
       .sort((a,b)=> a.letter===b.letter ? a.order-b.order : a.letter.localeCompare(b.letter));
   }
   function meetingsForDate(dk){
-    return state.meetings.filter(m=>m.date===dk).sort((a,b)=> a.time.localeCompare(b.time));
+    return state.meetings.filter(m => String(m.date) === String(dk))
+                         .sort((a,b)=> String(a.time).localeCompare(String(b.time)));
   }
   function nextOrder(dk, letter){
     const same = state.tasks.filter(t=>t.date===dk && t.letter===letter);
@@ -710,7 +711,14 @@
   }
 
   function timeRow(h, meetingsAtHour){
-    const chips = meetingsAtHour.map(m=>`
+    // h(예: "08:00")의 앞 두 글자("08")와 미팅 시간의 앞 두 글자가 일치하는지 안전하게 비교
+    const hourPrefix = h.slice(0,2);
+    const matchedMeetings = meetingsAtHour.filter(m => {
+      const mTime = String(m.time || '');
+      return mTime.slice(0,2) === hourPrefix;
+    });
+
+    const chips = matchedMeetings.map(m=>`
       <span class="meeting-chip" data-id="${m.id}">
         ${m.time} · ${escapeHtml(m.title)}
         <button data-act="del-meeting" data-id="${m.id}">✕</button>
