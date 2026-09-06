@@ -404,7 +404,7 @@
   // 2) 배포 > 새 배포 > 웹 앱으로 배포 (액세스 권한: "모든 사용자") 한 뒤
   // 3) 발급된 웹 앱 URL(.../exec)을 아래에 붙여넣으세요.
   const CONFIG = {
-    GAS_URL: 'https://script.google.com/macros/s/AKfycbw9eMupV1tdJz2nGv5l7G0KOQWoAWEdji3dHiEG2u8qg28nUhqwAV5fPJq5s3lz68sJKw/exec',
+    GAS_URL: 'https://script.google.com/macros/s/여기에_배포된_웹앱_URL을_붙여넣으세요/exec',
     POLL_MS: 20000 // 다른 기기/브라우저에서의 변경사항을 주기적으로 반영 (밀리초)
   };
 
@@ -426,7 +426,8 @@
 
   let saveTimer = null;
   let lastLocalChangeAt = 0; // 마지막으로 로컬에서 데이터를 바꾼 시각(ms) — 폴링과의 경쟁상태 방지용
-  const POLL_GUARD_MS = 4000; // 로컬 변경 후 이 시간 동안은 자동 새로고침(loadAll)을 건너뜀
+  let pendingWrites = 0;     // 현재 진행 중인 구글시트 저장 요청 개수
+  const POLL_GUARD_MS = 3000; // 저장이 끝난 뒤에도 이 시간만큼은 자동 새로고침을 추가로 미룸(여유 버퍼)
 
   /* ---- JSONP GET: 구글시트 전체 데이터 조회 (CORS 문제 없이 동작) ---- */
   function jsonp(url){
@@ -444,8 +445,9 @@
 
   /* ---- POST: 개별 항목 추가/수정/삭제 (text/plain 으로 보내 preflight 회피) ---- */
   async function postAction(action, payload){
-    lastLocalChangeAt = Date.now(); // 저장 요청 시작 시점부터 가드 시작
-    if(!gasConfigured()) return null;
+    pendingWrites++;              // 저장 요청 시작 — 완료될 때까지 폴링 자체를 막음(시간 무관, 완전 차단)
+    lastLocalChangeAt = Date.now();
+    if(!gasConfigured()){ pendingWrites--; return null; }
     try{
       const res = await fetch(CONFIG.GAS_URL, {
         method:'POST',
@@ -453,13 +455,15 @@
         body: JSON.stringify(Object.assign({action}, payload))
       });
       const result = await res.json();
-      lastLocalChangeAt = Date.now(); // 저장이 실제로 끝난 시점 기준으로 가드 시간을 다시 갱신
+      lastLocalChangeAt = Date.now(); // 저장이 실제로 끝난 시점 기준으로 버퍼 시간을 다시 갱신
       return result;
     }catch(e){
       console.error('sync post failed:', action, e);
       setSyncStatus('⚠ 오프라인 — 이 기기에만 임시 저장됨');
       lastLocalChangeAt = Date.now();
       return null;
+    }finally{
+      pendingWrites--;
     }
   }
 
@@ -473,10 +477,10 @@
     return a && (a.id==='focusInput' || a.id==='detailArea' || a.id==='taskInput' || a.tagName==='INPUT' && a.closest('.inline-form'));
   }
 
-  // 로컬 변경 직후(POLL_GUARD_MS 이내)에는 자동 새로고침을 건너뛰어,
+  // 로컬 변경 직후(POLL_GUARD_MS 이내)나, 저장 요청이 아직 진행 중일 때는 자동 새로고침을 건너뛰어,
   // 구글시트에 저장이 채 반영되기 전에 옛 데이터로 덮어써지는 것을 방지합니다.
   function canPollNow(){
-    return !isTypingNow() && (Date.now() - lastLocalChangeAt) > POLL_GUARD_MS;
+    return !isTypingNow() && pendingWrites===0 && (Date.now() - lastLocalChangeAt) > POLL_GUARD_MS;
   }
 
   async function loadAll(silent){
@@ -486,11 +490,21 @@
       return;
     }
     if(!silent) setSyncStatus('불러오는 중…');
+    const fetchStartedAt = Date.now(); // 이 요청이 "시작된" 시점을 기록
     try{
       const data = await jsonp(CONFIG.GAS_URL);
-      state.tasks = data.tasks || [];
-      state.meetings = data.meetings || [];
-      state.dayMeta = data.dayMeta || {};
+      if(lastLocalChangeAt > fetchStartedAt){
+        // 이 요청이 서버에 왕복하는 동안(특히 앱을 막 켜서 최초 로딩 중일 때) 로컬에서
+        // 새로 추가/수정한 내용이 있으면, 아직 서버 응답에 반영 안 됐을 수 있으므로
+        // 통째로 덮어쓰지 않고 "서버엔 없지만 로컬엔 있는" 항목을 보존해서 합칩니다.
+        state.tasks = mergeLocalOnly_(state.tasks, data.tasks || []);
+        state.meetings = mergeLocalOnly_(state.meetings, data.meetings || []);
+        state.dayMeta = Object.assign({}, data.dayMeta || {}, state.dayMeta);
+      } else {
+        state.tasks = data.tasks || [];
+        state.meetings = data.meetings || [];
+        state.dayMeta = data.dayMeta || {};
+      }
       const t = new Date();
       setSyncStatus('✓ 동기화됨 · ' + pad(t.getHours()) + ':' + pad(t.getMinutes()));
     }catch(e){
@@ -498,6 +512,13 @@
       setSyncStatus('⚠ 구글시트에서 불러오지 못했습니다');
     }
     render();
+  }
+
+  // 서버 응답(incoming)에 없는, 로컬에만 있는 항목(id 기준)을 뒤에 이어붙여 보존
+  function mergeLocalOnly_(local, incoming){
+    const incomingIds = new Set(incoming.map(x=>x.id));
+    const localOnly = local.filter(x=>!incomingIds.has(x.id));
+    return incoming.concat(localOnly);
   }
 
   // 다른 기기/브라우저(예: 아이폰 사파리, 다른 PC)에서 바뀐 내용을 주기적으로 반영
