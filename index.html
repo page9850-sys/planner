@@ -490,24 +490,47 @@
       return;
     }
     if(!silent) setSyncStatus('불러오는 중…');
-    const fetchStartedAt = Date.now(); // 이 요청이 "시작된" 시점을 기록
+    const fetchStartedAt = Date.now();
     try{
       const data = await jsonp(CONFIG.GAS_URL);
-      // 👇👇👇 새로 추가할 부분: 구글 시트의 불필요한 시간 형식(T...Z)을 잘라내고 날짜(YYYY-MM-DD)만 남깁니다 👇👇👇
-      const fixDate = d => (typeof d === 'string' && d.includes('T')) ? d.split('T')[0] : d;
-      
-      if (data.tasks) data.tasks.forEach(t => t.date = fixDate(t.date));
-      if (data.meetings) data.meetings.forEach(m => m.date = fixDate(m.date));
+
+      // 데이터 정규화: 구글 시트의 빈칸, 날짜/시간 객체 등을 강제로 안전한 텍스트로 변환하여 에러 방지
+      const safeStr = val => (val === null || val === undefined) ? '' : String(val);
+      const fixDate = d => {
+        const s = safeStr(d);
+        return s.includes('T') ? s.split('T')[0] : s;
+      };
+      const fixTime = t => {
+        const s = safeStr(t);
+        if(s.includes('T')){
+          const dObj = new Date(s);
+          return pad(dObj.getHours()) + ':' + pad(dObj.getMinutes());
+        }
+        return s || '00:00';
+      };
+
+      if (data.tasks) {
+        data.tasks.forEach(t => {
+          t.date = fixDate(t.date);
+          t.text = safeStr(t.text);
+          let l = safeStr(t.letter).toUpperCase();
+          t.letter = ['A','B','C'].includes(l) ? l : 'C'; // 빈칸이거나 엉뚱한 값이면 무조건 C로 고정
+        });
+      }
+      if (data.meetings) {
+        data.meetings.forEach(m => {
+          m.date = fixDate(m.date);
+          m.time = fixTime(m.time);
+          m.title = safeStr(m.title);
+        });
+      }
       if (data.dayMeta) {
         const newMeta = {};
         Object.keys(data.dayMeta).forEach(k => newMeta[fixDate(k)] = data.dayMeta[k]);
         data.dayMeta = newMeta;
       }
-      // 👆👆👆 코드 추가 끝 👆👆👆
+
       if(lastLocalChangeAt > fetchStartedAt){
-        // 이 요청이 서버에 왕복하는 동안(특히 앱을 막 켜서 최초 로딩 중일 때) 로컬에서
-        // 새로 추가/수정한 내용이 있으면, 아직 서버 응답에 반영 안 됐을 수 있으므로
-        // 통째로 덮어쓰지 않고 "서버엔 없지만 로컬엔 있는" 항목을 보존해서 합칩니다.
         state.tasks = mergeLocalOnly_(state.tasks, data.tasks || []);
         state.meetings = mergeLocalOnly_(state.meetings, data.meetings || []);
         state.dayMeta = Object.assign({}, data.dayMeta || {}, state.dayMeta);
@@ -516,8 +539,8 @@
         state.meetings = data.meetings || [];
         state.dayMeta = data.dayMeta || {};
       }
-      const t = new Date();
-      setSyncStatus('✓ 동기화됨 · ' + pad(t.getHours()) + ':' + pad(t.getMinutes()));
+      const timeNow = new Date();
+      setSyncStatus('✓ 동기화됨 · ' + pad(timeNow.getHours()) + ':' + pad(timeNow.getMinutes()));
     }catch(e){
       console.error('sync get failed:', e);
       setSyncStatus('⚠ 구글시트에서 불러오지 못했습니다');
