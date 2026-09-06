@@ -960,7 +960,17 @@
       };
     });
     page.querySelectorAll('[data-act="open-detail"]').forEach(el=>{
-      el.onclick = ()=>{ state.selectedTaskId = el.dataset.id; state.tab='2'; render(); };
+      el.onclick = ()=>{ 
+        const targetId = el.dataset.id;
+        const t = state.tasks.find(x=>x.id === targetId);
+        if(t) {
+          state.selectedTaskId = t.id; 
+          state.tab='2'; 
+          render(); 
+        } else {
+          console.warn('해당 업무를 찾을 수 없습니다:', targetId);
+        }
+      };
     });
 
     // meeting inline add
