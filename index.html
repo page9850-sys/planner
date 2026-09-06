@@ -711,18 +711,20 @@
   }
 
   function timeRow(h, meetingsAtHour){
-    // h(예: "08:00")의 앞 두 글자("08")와 미팅 시간의 앞 두 글자가 일치하는지 안전하게 비교
-    const hourPrefix = h.slice(0,2);
+    // h(예: "07:00")의 시간대(예: "07")와 미팅 시간의 앞 두 글자가 정확히 일치하는 항목만 필터링
+    const targetHour = h.slice(0,2);
     const matchedMeetings = meetingsAtHour.filter(m => {
       const mTime = String(m.time || '');
-      return mTime.slice(0,2) === hourPrefix;
+      // 시간 형식(HH:MM)의 앞 두 자리가 일치하는지 확인
+      return mTime.slice(0,2) === targetHour;
     });
 
     const chips = matchedMeetings.map(m=>`
       <span class="meeting-chip" data-id="${m.id}">
-        ${m.time} · ${escapeHtml(m.title)}
+        ${escapeHtml(m.time)} · ${escapeHtml(m.title)}
         <button data-act="del-meeting" data-id="${m.id}">✕</button>
       </span>`).join('');
+      
     return `
       <div class="time-row" data-hour="${h}">
         <div class="time-label">${h}</div>
