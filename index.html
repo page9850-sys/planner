@@ -404,7 +404,7 @@
   // 2) 배포 > 새 배포 > 웹 앱으로 배포 (액세스 권한: "모든 사용자") 한 뒤
   // 3) 발급된 웹 앱 URL(.../exec)을 아래에 붙여넣으세요.
   const CONFIG = {
-    GAS_URL: 'https://script.google.com/macros/s/AKfycbyFQCp8CITZVTbiAeFTBrDOLROs-OmsGVYQvFgivB4kl9KAUNR65bT1SfjjnJNY-GkqEw/exec',
+    GAS_URL: 'https://script.google.com/macros/s/여기에_배포된_웹앱_URL을_붙여넣으세요/exec',
     POLL_MS: 20000 // 다른 기기/브라우저에서의 변경사항을 주기적으로 반영 (밀리초)
   };
 
@@ -479,50 +479,26 @@
     return !isTypingNow() && (Date.now() - lastLocalChangeAt) > POLL_GUARD_MS;
   }
 
-  // 기존 loadAll 함수 내부 수정 예시
-async function loadAll() {
-  const syncStatus = document.getElementById('syncStatus');
-  const syncTime = document.getElementById('syncTime');
-
-  // CONFIG.GAS_URL 주소가 설정되어 있지 않으면 로컬스토리지 모드로 동작
-  if (!CONFIG.GAS_URL || CONFIG.GAS_URL.includes('YOUR_GAS_WEB_APP_URL')) {
-    if (syncStatus) syncStatus.textContent = '● 로컬 모드';
-    return;
-  }
-
-  try {
-    if (syncStatus) syncStatus.textContent = '동기화 중…';
-
-    // Google Apps Script 요청 시 redirect: 'follow' 옵션 필수
-    const res = await fetch(CONFIG.GAS_URL + '?action=readAll', {
-      method: 'GET',
-      redirect: 'follow'
-    });
-
-    if (!res.ok) throw new Error(`HTTP 에러: ${res.status}`);
-
-    const data = await res.json();
-
-    // 💡 [핵심] 구글 응답 데이터 형태(data.tasks 또는 data) 검증
-    const fetchedTasks = Array.isArray(data) ? data : (data.tasks || null);
-
-    if (Array.isArray(fetchedTasks)) {
-      // 정상적으로 배열을 받아왔을 때만 state 업데이트 (데이터 보호)
-      state.tasks = fetchedTasks;
+  async function loadAll(silent){
+    if(!gasConfigured()){
+      setSyncStatus('⚠ 구글시트 미연동 — CONFIG.GAS_URL을 설정하세요');
       render();
-
-      if (syncStatus) syncStatus.textContent = '✓ 동기화됨';
-      if (syncTime) {
-        const now = new Date();
-        syncTime.textContent = `${String(now.getHours()).padStart(2,'0')}:${String(now.getMinutes()).padStart(2,'0')}`;
-      }
+      return;
     }
-  } catch (err) {
-    console.error('동기화 실패:', err);
-    // 💡 [핵심] 실패 시 state.tasks = []로 비우지 않고 기존 데이터 유지!
-    if (syncStatus) syncStatus.textContent = '⚠ 동기화 실패 (기존 데이터 유지)';
+    if(!silent) setSyncStatus('불러오는 중…');
+    try{
+      const data = await jsonp(CONFIG.GAS_URL);
+      state.tasks = data.tasks || [];
+      state.meetings = data.meetings || [];
+      state.dayMeta = data.dayMeta || {};
+      const t = new Date();
+      setSyncStatus('✓ 동기화됨 · ' + pad(t.getHours()) + ':' + pad(t.getMinutes()));
+    }catch(e){
+      console.error('sync get failed:', e);
+      setSyncStatus('⚠ 구글시트에서 불러오지 못했습니다');
+    }
+    render();
   }
-}
 
   // 다른 기기/브라우저(예: 아이폰 사파리, 다른 PC)에서 바뀐 내용을 주기적으로 반영
   // setInterval 대신 완료 후 재예약 방식을 써서, 폴링이 진행 중인 저장 요청과 겹치지 않게 함
