@@ -494,17 +494,32 @@
     try{
       const data = await jsonp(CONFIG.GAS_URL);
 
-      // 데이터 정규화: 구글 시트의 빈칸, 날짜/시간 객체 등을 강제로 안전한 텍스트로 변환하여 에러 방지
+      // 수정된 부분: 한국 시간(KST)이 UTC로 변환되면서 날짜가 '하루 전'으로 밀리는 시차 문제 완벽 방지
       const safeStr = val => (val === null || val === undefined) ? '' : String(val);
+      
       const fixDate = d => {
         const s = safeStr(d);
-        return s.includes('T') ? s.split('T')[0] : s;
+        if(s.includes('T')){
+          const dObj = new Date(s);
+          // 단순히 문자열을 자르지 않고, 기기의 로컬 시간대 기준으로 날짜를 다시 조합합니다.
+          const yy = dObj.getFullYear();
+          const mm = String(dObj.getMonth() + 1).padStart(2, '0');
+          const dd = String(dObj.getDate()).padStart(2, '0');
+          return `${yy}-${mm}-${dd}`;
+        }
+        return s;
       };
+
       const fixTime = t => {
         const s = safeStr(t);
         if(s.includes('T')){
           const dObj = new Date(s);
-          return pad(dObj.getHours()) + ':' + pad(dObj.getMinutes());
+          // 기기의 로컬 시간대 기준으로 시간(HH:MM)을 추출합니다.
+          return String(dObj.getHours()).padStart(2, '0') + ':' + 
+                 String(dObj.getMinutes()).padStart(2, '0');
+        }
+        if(s.includes(':')){
+          return s.substring(0, 5);
         }
         return s || '00:00';
       };
@@ -514,7 +529,7 @@
           t.date = fixDate(t.date);
           t.text = safeStr(t.text);
           let l = safeStr(t.letter).toUpperCase();
-          t.letter = ['A','B','C'].includes(l) ? l : 'C'; // 빈칸이거나 엉뚱한 값이면 무조건 C로 고정
+          t.letter = ['A','B','C'].includes(l) ? l : 'C';
         });
       }
       if (data.meetings) {
@@ -540,7 +555,7 @@
         state.dayMeta = data.dayMeta || {};
       }
       const timeNow = new Date();
-      setSyncStatus('✓ 동기화됨 · ' + pad(timeNow.getHours()) + ':' + pad(timeNow.getMinutes()));
+      setSyncStatus('✓ 동기화됨 · ' + String(timeNow.getHours()).padStart(2,'0') + ':' + String(timeNow.getMinutes()).padStart(2,'0'));
     }catch(e){
       console.error('sync get failed:', e);
       setSyncStatus('⚠ 구글시트에서 불러오지 못했습니다');
