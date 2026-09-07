@@ -95,7 +95,7 @@
     padding:20px 22px 26px;
     position:relative;
   }
-  .page::before{ /* center stitch shadow */
+  .page::before{
     content:'';position:absolute;inset:0;pointer-events:none;
     box-shadow: inset 6px 0 10px -8px rgba(0,0,0,.4);
     border-radius:4px 10px 10px 4px;
@@ -368,9 +368,9 @@
       <div class="brand" id="yearTag"></div>
     </div>
     <div class="brand-row" style="padding-top:0;">
-      <div class="brand" id="syncStatus" style="font-size:11px;opacity:.75;"></div>
+      <div class="brand" id="syncStatus" style="font-size:11px;opacity:.85;color:var(--brass-light);"></div>
       <div class="brand" style="font-size:11px;">
-        <button id="syncRefreshBtn" style="background:none;border:1px solid var(--brass);color:var(--brass-light);border-radius:4px;padding:2px 8px;cursor:pointer;font-family:var(--font-mono);font-size:10.5px;">⟳ 새로고침</button>
+        <button id="syncRefreshBtn" style="background:none;border:1px solid var(--brass);color:var(--brass-light);border-radius:4px;padding:2px 8px;cursor:pointer;font-family:var(--font-mono);font-size:10.5px;">⟳ 동기화</button>
       </div>
     </div>
 
@@ -389,7 +389,8 @@
 (function(){
   "use strict";
 
-  /* ---------------- utils ---------------- */
+  const LOCAL_STORAGE_KEY = 'DAY_MASTER_PLANNER_V2';
+
   const pad = n => String(n).padStart(2,'0');
   const toKey = d => `${d.getFullYear()}-${pad(d.getMonth()+1)}-${pad(d.getDate())}`;
   const fromKey = k => { const [y,m,d]=k.split('-').map(Number); return new Date(y,m-1,d); };
@@ -400,12 +401,9 @@
   const HOURS = []; for(let h=7; h<=21; h++) HOURS.push(pad(h)+":00");
 
   /* ---------------- 구글시트(Apps Script) 연동 설정 ---------------- */
-  // 1) 구글시트에서 확장 프로그램 > Apps Script 에 Code.gs 코드를 붙여넣고
-  // 2) 배포 > 새 배포 > 웹 앱으로 배포 (액세스 권한: "모든 사용자") 한 뒤
-  // 3) 발급된 웹 앱 URL(.../exec)을 아래에 붙여넣으세요.
   const CONFIG = {
-    GAS_URL: 'https://script.google.com/macros/s/AKfycbwkIrVwYdxBSSZ-C-USt3TLHS6j7zQktfmztJ1Qrin6aqkCIdTT8A-0kIO2_4tuuL6v/exec',
-    POLL_MS: 20000 // 다른 기기/브라우저에서의 변경사항을 주기적으로 반영 (밀리초)
+    GAS_URL: 'https://script.google.com/macros/s/여기에_배포된_웹앱_URL을_붙여넣으세요/exec',
+    POLL_MS: 20000 // 주기적 백그라운드 동기화 (20초)
   };
 
   function gasConfigured(){
@@ -420,21 +418,52 @@
     currentDate: toKey(new Date()),
     selectedTaskId: null,
     tab: '1',
-    calView: 'daily',     // daily | weekly | monthly
-    calAnchor: toKey(new Date()) // date the calendar is centered on
+    calView: 'daily',
+    calAnchor: toKey(new Date())
   };
 
   let saveTimer = null;
-  let lastLocalChangeAt = 0; // 마지막으로 로컬에서 데이터를 바꾼 시각(ms) — 폴링과의 경쟁상태 방지용
-  let pendingWrites = 0;     // 현재 진행 중인 구글시트 저장 요청 개수
-  const POLL_GUARD_MS = 3000; // 저장이 끝난 뒤에도 이 시간만큼은 자동 새로고침을 추가로 미룸(여유 버퍼)
+  let lastLocalChangeAt = 0;
+  let pendingWrites = 0;
+  const POLL_GUARD_MS = 4000;
 
-  /* ---- JSONP GET: 구글시트 전체 데이터 조회 (CORS 문제 없이 동작) ---- */
+  // 1차 안전망: 모든 변경사항을 LocalStorage에 영구 보존
+  function saveToLocalStorage(){
+    try {
+      const payload = {
+        tasks: state.tasks,
+        meetings: state.meetings,
+        dayMeta: state.dayMeta,
+        updatedAt: Date.now()
+      };
+      localStorage.setItem(LOCAL_STORAGE_KEY, JSON.stringify(payload));
+    } catch(e) {
+      console.error('LocalStorage save failed:', e);
+    }
+  }
+
+  function loadFromLocalStorage(){
+    try {
+      const raw = localStorage.getItem(LOCAL_STORAGE_KEY);
+      if(raw){
+        const data = JSON.parse(raw);
+        if(Array.isArray(data.tasks)) state.tasks = data.tasks;
+        if(Array.isArray(data.meetings)) state.meetings = data.meetings;
+        if(data.dayMeta) state.dayMeta = data.dayMeta;
+        return true;
+      }
+    } catch(e) {
+      console.error('LocalStorage load failed:', e);
+    }
+    return false;
+  }
+
+  /* ---- JSONP GET: 구글시트 데이터 조회 ---- */
   function jsonp(url){
     return new Promise((resolve, reject)=>{
       const cbName = 'plannerCb_' + Math.random().toString(36).slice(2);
       const script = document.createElement('script');
-      const timer = setTimeout(()=>{ cleanup(); reject(new Error('timeout')); }, 15000);
+      const timer = setTimeout(()=>{ cleanup(); reject(new Error('timeout')); }, 12000);
       function cleanup(){ delete window[cbName]; script.remove(); clearTimeout(timer); }
       window[cbName] = (data)=>{ cleanup(); resolve(data); };
       script.onerror = ()=>{ cleanup(); reject(new Error('load error')); };
@@ -443,11 +472,18 @@
     });
   }
 
-  /* ---- POST: 개별 항목 추가/수정/삭제 (text/plain 으로 보내 preflight 회피) ---- */
+  /* ---- POST: 항목 추가/수정/삭제 ---- */
   async function postAction(action, payload){
-    pendingWrites++;              // 저장 요청 시작 — 완료될 때까지 폴링 자체를 막음(시간 무관, 완전 차단)
+    // 데이터 변경 즉시 LocalStorage 보존
     lastLocalChangeAt = Date.now();
-    if(!gasConfigured()){ pendingWrites--; return null; }
+    saveToLocalStorage();
+
+    if(!gasConfigured()){
+      setSyncStatus('✓ 로컬 저장됨 (구글시트 미연동)');
+      return null;
+    }
+
+    pendingWrites++;
     try{
       const res = await fetch(CONFIG.GAS_URL, {
         method:'POST',
@@ -455,11 +491,12 @@
         body: JSON.stringify(Object.assign({action}, payload))
       });
       const result = await res.json();
-      lastLocalChangeAt = Date.now(); // 저장이 실제로 끝난 시점 기준으로 버퍼 시간을 다시 갱신
+      lastLocalChangeAt = Date.now();
+      setSyncStatus('✓ 로컬 & 구글시트 저장 완료');
       return result;
     }catch(e){
       console.error('sync post failed:', action, e);
-      setSyncStatus('⚠ 오프라인 — 이 기기에만 임시 저장됨');
+      setSyncStatus('✓ 로컬 저장됨 (구글시트 오프라인)');
       lastLocalChangeAt = Date.now();
       return null;
     }finally{
@@ -474,104 +511,67 @@
 
   function isTypingNow(){
     const a = document.activeElement;
-    return a && (a.id==='focusInput' || a.id==='detailArea' || a.id==='taskInput' || a.tagName==='INPUT' && a.closest('.inline-form'));
+    return a && (a.id==='focusInput' || a.id==='detailArea' || a.id==='taskInput' || (a.tagName==='INPUT' && a.closest('.inline-form')));
   }
 
-  // 로컬 변경 직후(POLL_GUARD_MS 이내)나, 저장 요청이 아직 진행 중일 때는 자동 새로고침을 건너뛰어,
-  // 구글시트에 저장이 채 반영되기 전에 옛 데이터로 덮어써지는 것을 방지합니다.
   function canPollNow(){
     return !isTypingNow() && pendingWrites===0 && (Date.now() - lastLocalChangeAt) > POLL_GUARD_MS;
   }
 
+  // 지능형 병합: 로컬에만 새로 작성된 미팅/할일이 서버 데이터에 의해 사라지지 않도록 보호
+  function mergeSmart(localList, remoteList){
+    const remoteMap = new Map((remoteList||[]).map(item => [item.id, item]));
+    const localMap = new Map((localList||[]).map(item => [item.id, item]));
+
+    const merged = [];
+
+    // 1. 서버 데이터를 우선 기반으로 수집
+    for(const [id, remoteItem] of remoteMap.entries()){
+      merged.push(remoteItem);
+    }
+
+    // 2. 서버에는 아직 저장되지 않은 로컬 생성 데이터를 유지하여 덮어쓰기 방지
+    for(const [id, localItem] of localMap.entries()){
+      if(!remoteMap.has(id)){
+        merged.push(localItem);
+      }
+    }
+
+    return merged;
+  }
+
   async function loadAll(silent){
+    // 앱 진입 시 LocalStorage에서 먼저 안전하게 복구
+    loadFromLocalStorage();
+
     if(!gasConfigured()){
-      setSyncStatus('⚠ 구글시트 미연동 — CONFIG.GAS_URL을 설정하세요');
+      setSyncStatus('✓ 로컬 전용 저장 모드');
       render();
       return;
     }
+
     if(!silent) setSyncStatus('불러오는 중…');
     const fetchStartedAt = Date.now();
     try{
       const data = await jsonp(CONFIG.GAS_URL);
-
-      // 수정된 부분: 한국 시간(KST)이 UTC로 변환되면서 날짜가 '하루 전'으로 밀리는 시차 문제 완벽 방지
-      const safeStr = val => (val === null || val === undefined) ? '' : String(val);
       
-      const fixDate = d => {
-        const s = safeStr(d);
-        if(s.includes('T')){
-          const dObj = new Date(s);
-          // 단순히 문자열을 자르지 않고, 기기의 로컬 시간대 기준으로 날짜를 다시 조합합니다.
-          const yy = dObj.getFullYear();
-          const mm = String(dObj.getMonth() + 1).padStart(2, '0');
-          const dd = String(dObj.getDate()).padStart(2, '0');
-          return `${yy}-${mm}-${dd}`;
-        }
-        return s;
-      };
+      // 스마트 데이터 병합 적용
+      state.tasks = mergeSmart(state.tasks, data.tasks);
+      state.meetings = mergeSmart(state.meetings, data.meetings);
+      state.dayMeta = Object.assign({}, data.dayMeta || {}, state.dayMeta || {});
 
-      const fixTime = t => {
-        const s = safeStr(t);
-        if(s.includes('T')){
-          const dObj = new Date(s);
-          // 기기의 로컬 시간대 기준으로 시간(HH:MM)을 추출합니다.
-          return String(dObj.getHours()).padStart(2, '0') + ':' + 
-                 String(dObj.getMinutes()).padStart(2, '0');
-        }
-        if(s.includes(':')){
-          return s.substring(0, 5);
-        }
-        return s || '00:00';
-      };
+      // 병합 결과를 LocalStorage에 반영
+      saveToLocalStorage();
 
-      if (data.tasks) {
-        data.tasks.forEach(t => {
-          t.date = fixDate(t.date);
-          t.text = safeStr(t.text);
-          let l = safeStr(t.letter).toUpperCase();
-          t.letter = ['A','B','C'].includes(l) ? l : 'C';
-        });
-      }
-      if (data.meetings) {
-        data.meetings.forEach(m => {
-          m.date = fixDate(m.date);
-          m.time = fixTime(m.time);
-          m.title = safeStr(m.title);
-        });
-      }
-      if (data.dayMeta) {
-        const newMeta = {};
-        Object.keys(data.dayMeta).forEach(k => newMeta[fixDate(k)] = data.dayMeta[k]);
-        data.dayMeta = newMeta;
-      }
-
-      if(lastLocalChangeAt > fetchStartedAt){
-        state.tasks = mergeLocalOnly_(state.tasks, data.tasks || []);
-        state.meetings = mergeLocalOnly_(state.meetings, data.meetings || []);
-        state.dayMeta = Object.assign({}, data.dayMeta || {}, state.dayMeta);
-      } else {
-        state.tasks = data.tasks || [];
-        state.meetings = data.meetings || [];
-        state.dayMeta = data.dayMeta || {};
-      }
-      const timeNow = new Date();
-      setSyncStatus('✓ 동기화됨 · ' + String(timeNow.getHours()).padStart(2,'0') + ':' + String(timeNow.getMinutes()).padStart(2,'0'));
+      const t = new Date();
+      setSyncStatus('✓ 동기화 완료 · ' + pad(t.getHours()) + ':' + pad(t.getMinutes()));
     }catch(e){
       console.error('sync get failed:', e);
-      setSyncStatus('⚠ 구글시트에서 불러오지 못했습니다');
+      setSyncStatus('✓ 로컬 데이터 불러옴 (구글시트 오프라인)');
     }
     render();
   }
 
-  // 서버 응답(incoming)에 없는, 로컬에만 있는 항목(id 기준)을 뒤에 이어붙여 보존
-  function mergeLocalOnly_(local, incoming){
-    const incomingIds = new Set(incoming.map(x=>x.id));
-    const localOnly = local.filter(x=>!incomingIds.has(x.id));
-    return incoming.concat(localOnly);
-  }
-
-  // 다른 기기/브라우저(예: 아이폰 사파리, 다른 PC)에서 바뀐 내용을 주기적으로 반영
-  // setInterval 대신 완료 후 재예약 방식을 써서, 폴링이 진행 중인 저장 요청과 겹치지 않게 함
   let pollTimer = null;
   function schedulePoll(){
     if(pollTimer) clearTimeout(pollTimer);
@@ -593,8 +593,7 @@
       .sort((a,b)=> a.letter===b.letter ? a.order-b.order : a.letter.localeCompare(b.letter));
   }
   function meetingsForDate(dk){
-    return state.meetings.filter(m => String(m.date) === String(dk))
-                         .sort((a,b)=> String(a.time).localeCompare(String(b.time)));
+    return state.meetings.filter(m=>m.date===dk).sort((a,b)=> a.time.localeCompare(b.time));
   }
   function nextOrder(dk, letter){
     const same = state.tasks.filter(t=>t.date===dk && t.letter===letter);
@@ -711,20 +710,11 @@
   }
 
   function timeRow(h, meetingsAtHour){
-    // h(예: "07:00")의 시간대(예: "07")와 미팅 시간의 앞 두 글자가 정확히 일치하는 항목만 필터링
-    const targetHour = h.slice(0,2);
-    const matchedMeetings = meetingsAtHour.filter(m => {
-      const mTime = String(m.time || '');
-      // 시간 형식(HH:MM)의 앞 두 자리가 일치하는지 확인
-      return mTime.slice(0,2) === targetHour;
-    });
-
-    const chips = matchedMeetings.map(m=>`
+    const chips = meetingsAtHour.map(m=>`
       <span class="meeting-chip" data-id="${m.id}">
         ${escapeHtml(m.time)} · ${escapeHtml(m.title)}
         <button data-act="del-meeting" data-id="${m.id}">✕</button>
       </span>`).join('');
-      
     return `
       <div class="time-row" data-hour="${h}">
         <div class="time-label">${h}</div>
@@ -793,7 +783,7 @@
       <div class="cal-title">${fmtDateLong(dk)}</div>
       <div class="day-list" style="margin-top:12px;">
         ${meetings.length ? meetings.map(m=>`
-          <div class="day-item"><div class="dt-time">${m.time}</div><div class="dt-title">${escapeHtml(m.title)}</div></div>
+          <div class="day-item"><div class="dt-time">${escapeHtml(m.time)}</div><div class="dt-title">${escapeHtml(m.title)}</div></div>
         `).join('') : '<div class="empty-msg">등록된 회의 일정이 없습니다.</div>'}
       </div>
     `;
@@ -811,7 +801,7 @@
         <div class="week-col ${dk===todayKey?'today':''}" data-act="cal-pick-day" data-date="${dk}">
           <div class="wc-dow">${DOW[d.getDay()]}</div>
           <div class="wc-num">${d.getDate()}</div>
-          ${ms.map(m=>`<div class="wc-item">${m.time} ${escapeHtml(m.title)}</div>`).join('')}
+          ${ms.map(m=>`<div class="wc-item">${escapeHtml(m.time)} ${escapeHtml(m.title)}</div>`).join('')}
         </div>`;
     }
     const end = new Date(start); end.setDate(start.getDate()+6);
@@ -843,7 +833,7 @@
       cells += `
         <div class="month-cell ${other?'other':''} ${dk===todayKey?'today':''}" data-act="cal-pick-day" data-date="${dk}">
           <div class="mc-num">${cellDate.getDate()}</div>
-          ${shown.map(m=>`<div class="mc-item">${m.time} ${escapeHtml(m.title)}</div>`).join('')}
+          ${shown.map(m=>`<div class="mc-item">${escapeHtml(m.time)} ${escapeHtml(m.title)}</div>`).join('')}
           ${ms.length>2?`<div class="mc-more">+${ms.length-2}개 더보기</div>`:''}
         </div>`;
     }
@@ -869,6 +859,7 @@
         const dk = state.currentDate;
         state.dayMeta[dk] = state.dayMeta[dk] || {};
         state.dayMeta[dk].focus = focusInput.value;
+        saveToLocalStorage(); // 즉시 로컬 저장
         clearTimeout(saveTimer);
         saveTimer = setTimeout(()=>{ postAction('upsertDayMeta', {date:dk, focus: state.dayMeta[dk].focus}); }, 400);
       };
@@ -918,7 +909,7 @@
       ti.onkeydown = e=>{ if(e.key==='Enter') doAdd(); };
     }
 
-    // task 상태 변경: 완료 / 이월 / 위임 (다시 누르면 진행중으로 되돌림)
+    // task 상태 변경: 완료 / 이월 / 위임
     page.querySelectorAll('[data-act="task-status"]').forEach(el=>{
       el.onclick = ()=>{
         const t = state.tasks.find(x=>x.id===el.dataset.id);
@@ -927,13 +918,11 @@
         const current = t.status || (t.done ? 'done' : 'open');
 
         if(clicked === 'carried'){
-          // 다음날로 이월: 날짜를 다음날로 옮기고 진행중 상태로 재등록
           t.date = shiftDate(t.date, 1);
           t.order = nextOrder(t.date, t.letter);
           t.status = 'open';
           t.done = false;
         } else if(current === clicked){
-          // 같은 버튼을 다시 누르면 진행중으로 취소
           t.status = 'open';
           t.done = false;
           if(clicked==='delegated') t.delegate = '';
@@ -960,27 +949,17 @@
       };
     });
     page.querySelectorAll('[data-act="open-detail"]').forEach(el=>{
-      el.onclick = ()=>{ 
-        const targetId = el.dataset.id;
-        const t = state.tasks.find(x=>x.id === targetId);
-        if(t) {
-          state.selectedTaskId = t.id; 
-          state.tab='2'; 
-          render(); 
-        } else {
-          console.warn('해당 업무를 찾을 수 없습니다:', targetId);
-        }
-      };
+      el.onclick = ()=>{ state.selectedTaskId = el.dataset.id; state.tab='2'; render(); };
     });
 
-    // meeting inline add
+    // 시간 관리 미팅 일정 추가 핸들러
     page.querySelectorAll('[data-act="show-meeting-form"]').forEach(el=>{
       el.onclick = ()=>{
         const row = el.closest('.time-content');
         const hour = el.dataset.hour.slice(0,2);
         el.outerHTML = `
           <form class="inline-form" data-act="meeting-form" data-hour="${hour}">
-            <input type="text" placeholder="회의 제목" autofocus/>
+            <input type="text" placeholder="회의/일정 제목" autofocus/>
             <input type="text" style="max-width:60px;flex:none;" value="${hour}:00" />
             <button type="submit">저장</button>
           </form>`;
@@ -1010,13 +989,14 @@
       };
     });
 
-    // tab2
+    // tab2 detail textarea
     const detailArea = document.getElementById('detailArea');
     if(detailArea){
       detailArea.oninput = ()=>{
         const t = state.tasks.find(x=>x.id===state.selectedTaskId);
         if(!t) return;
         t.detail = detailArea.value;
+        saveToLocalStorage(); // 즉시 로컬 저장
         const note = document.getElementById('saveNote');
         note.textContent = '저장 중…';
         clearTimeout(saveTimer);
@@ -1026,7 +1006,7 @@
     const backBtn = page.querySelector('[data-act="back-to-tab1"]');
     if(backBtn) backBtn.onclick = ()=>{ state.tab='1'; render(); };
 
-    // tab3
+    // tab3 calendar
     page.querySelectorAll('[data-act="cal-view"]').forEach(el=>{
       el.onclick = ()=>{ state.calView = el.dataset.view; render(); };
     });
@@ -1052,7 +1032,7 @@
     }
   }
 
-  /* ---------------- tab switching ---------------- */
+  /* ---------------- tab switching & boot ---------------- */
   document.querySelectorAll('.tab-btn').forEach(btn=>{
     btn.addEventListener('click', ()=>{ state.tab = btn.dataset.tab; render(); });
   });
@@ -1060,6 +1040,7 @@
   const refreshBtn = document.getElementById('syncRefreshBtn');
   if(refreshBtn) refreshBtn.onclick = ()=> loadAll();
 
+  // 최초 로딩 시작 (LocalStorage 선 복구 후 서버 조회)
   loadAll();
 })();
 </script>
